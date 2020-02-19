@@ -11,6 +11,8 @@
 
 #include <libuvc_camera/UVCCameraConfig.h>
 
+#include <cv_bridge/cv_bridge.h>
+
 namespace libuvc_camera {
 
 class CameraDriver {
@@ -55,6 +57,8 @@ private:
   void ImageCallback(uvc_frame_t *frame);
   static void ImageCallbackAdapter(uvc_frame_t *frame, void *ptr);
 
+  void AGC_Basic_Linear(cv::Mat input_16, cv::Mat output_8, int height, int width);
+
   ros::NodeHandle nh_, priv_nh_;
 
   State state_;
@@ -67,6 +71,9 @@ private:
 
   image_transport::ImageTransport it_;
   image_transport::CameraPublisher cam_pub_;
+
+  image_transport::Publisher pub_vis_;
+  image_transport::Publisher pub_vis_16_;
 
   dynamic_reconfigure::Server<UVCCameraConfig> config_server_;
   UVCCameraConfig config_;

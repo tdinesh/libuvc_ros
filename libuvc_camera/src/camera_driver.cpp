@@ -39,9 +39,14 @@
 #include <image_transport/camera_publisher.h>
 #include <dynamic_reconfigure/server.h>
 #include <libuvc/libuvc.h>
+
 #define libuvc_VERSION (libuvc_VERSION_MAJOR * 10000 \
                       + libuvc_VERSION_MINOR * 100 \
                       + libuvc_VERSION_PATCH)
+
+#define PT1_VID 0x1e4e
+#define PT1_PID 0x0100
+#define FLIR_VID 0x09cb
 
 namespace libuvc_camera {
 
@@ -54,6 +59,9 @@ CameraDriver::CameraDriver(ros::NodeHandle nh, ros::NodeHandle priv_nh)
     config_changed_(false),
     cinfo_manager_(nh) {
   cam_pub_ = it_.advertiseCamera("image_raw", 1, false);
+
+  pub_vis_ = it_.advertise("thermal_image", 1);
+  pub_vis_16_ = it_.advertise("thermal_image_16", 1);
 }
 
 CameraDriver::~CameraDriver() {
@@ -77,9 +85,7 @@ bool CameraDriver::Start() {
   }
 
   state_ = kStopped;
-
   config_server_.setCallback(boost::bind(&CameraDriver::ReconfigureCallback, this, _1, _2));
-
   return state_ == kRunning;
 }
 
@@ -114,6 +120,7 @@ void CameraDriver::ReconfigureCallback(UVCCameraConfig &new_config, uint32_t lev
   if (new_config.camera_info_url != config_.camera_info_url)
     cinfo_manager_.loadCameraInfo(new_config.camera_info_url);
 
+  /*
   if (state_ == kRunning) {
 #define PARAM_INT(name, fn, value) if (new_config.name != config_.name) { \
       int val = (value);                                                \
@@ -129,12 +136,12 @@ void CameraDriver::ReconfigureCallback(UVCCameraConfig &new_config, uint32_t lev
     PARAM_INT(exposure_absolute, exposure_abs, new_config.exposure_absolute * 10000);
     PARAM_INT(auto_focus, focus_auto, new_config.auto_focus ? 1 : 0);
     PARAM_INT(focus_absolute, focus_abs, new_config.focus_absolute);
-#if libuvc_VERSION     > 00005 /* version > 0.0.5 */
+#if libuvc_VERSION
     PARAM_INT(gain, gain, new_config.gain);
     PARAM_INT(iris_absolute, iris_abs, new_config.iris_absolute);
     PARAM_INT(brightness, brightness, new_config.brightness);
 #endif
-    
+
 
     if (new_config.pan_absolute != config_.pan_absolute || new_config.tilt_absolute != config_.tilt_absolute) {
       if (uvc_set_pantilt_abs(devh_, new_config.pan_absolute, new_config.tilt_absolute)) {
@@ -157,8 +164,40 @@ void CameraDriver::ReconfigureCallback(UVCCameraConfig &new_config, uint32_t lev
     // TODO: white_balance_BU
     // TODO: white_balance_RV
   }
+  */
 
   config_ = new_config;
+}
+
+
+void CameraDriver::AGC_Basic_Linear(cv::Mat input_16, cv::Mat output_8, int height, int width)
+{
+    int i, j;
+    unsigned int max1 = 0;
+    unsigned int min1 = 0xFFFF;
+    unsigned int value1, value2, value3, value4;
+    for (i = 0; i < height; i++) {
+        for (j = 0; j < width; j++) {
+            value1 = input_16.at<uchar>(i, j * 2 + 1) & 0XFF;
+            value2 = input_16.at<uchar>(i, j * 2) & 0xFF;
+            value3 = (value1 << 8) + value2;
+            if (value3 <= min1) {
+                min1 = value3;
+            }
+            if (value3 >= max1) {
+                max1 = value3;
+            }
+        }
+    }
+    for (int i = 0; i < height; i++) {
+        for (int j = 0; j < width; j++) {
+            value1 = input_16.at<uchar>(i, j * 2 + 1) & 0XFF;
+            value2 = input_16.at<uchar>(i, j * 2) & 0xFF;
+            value3 = (value1 << 8) + value2;
+            value4 = ((255 * (value3 - min1))) / (max1 - min1);
+            output_8.at<uchar>(i, j) = (uchar) (value4 & 0xFF);
+        }
+    }
 }
 
 void CameraDriver::ImageCallback(uvc_frame_t *frame) {
@@ -172,12 +211,29 @@ void CameraDriver::ImageCallback(uvc_frame_t *frame) {
   assert(state_ == kRunning);
   assert(rgb_frame_);
 
+  //ROS_WARN("%d %d %d %d", frame->width, frame->height, frame->step, frame->data_bytes);
+
+  /* Declarations for RAW16 representation */
+  // 16-bit Placeholder
+  cv::Mat thermal16(config_.height, config_.width, CV_16U, frame->data);
+  // 8-bit Placeholder
+  cv::Mat thermal16_linear(config_.height, config_.width, CV_8U, 1);
+
+  cv::Mat thermal_rgb(config_.height, config_.width, CV_8UC3, 1);
+
+
+  /*
   sensor_msgs::Image::Ptr image(new sensor_msgs::Image());
   image->width = config_.width;
   image->height = config_.height;
   image->step = image->width * 3;
   image->data.resize(image->step * image->height);
+  */
 
+  //For lepton 3.5
+  //assume frame format(frame->frame_format == UVC_FRAME_FORMAT_Y16)
+
+  /*
   if (frame->frame_format == UVC_FRAME_FORMAT_BGR){
     image->encoding = "bgr8";
     memcpy(&(image->data[0]), frame->data, frame->data_bytes);
@@ -197,12 +253,14 @@ void CameraDriver::ImageCallback(uvc_frame_t *frame) {
     image->step = image->width;
     image->data.resize(image->step * image->height);
     memcpy(&(image->data[0]), frame->data, frame->data_bytes);
-  } else if (frame->frame_format == UVC_FRAME_FORMAT_GRAY16) {
+  }
+  else if (frame->frame_format == UVC_FRAME_FORMAT_Y16) {
     image->encoding = "16UC1";
     image->step = image->width*2;
     image->data.resize(image->step * image->height);
     memcpy(&(image->data[0]), frame->data, frame->data_bytes);
-  } else if (frame->frame_format == UVC_FRAME_FORMAT_YUYV) {
+  }
+  else if (frame->frame_format == UVC_FRAME_FORMAT_YUYV) {
     // FIXME: uvc_any2bgr does not work on "yuyv" format, so use uvc_yuyv2bgr directly.
     uvc_error_t conv_ret = uvc_yuyv2bgr(frame, rgb_frame_);
     if (conv_ret != UVC_SUCCESS) {
@@ -211,7 +269,7 @@ void CameraDriver::ImageCallback(uvc_frame_t *frame) {
     }
     image->encoding = "bgr8";
     memcpy(&(image->data[0]), rgb_frame_->data, rgb_frame_->data_bytes);
-#if libuvc_VERSION     > 00005 /* version > 0.0.5 */
+#if libuvc_VERSION     > 00005
   } else if (frame->frame_format == UVC_FRAME_FORMAT_MJPEG) {
     // Enable mjpeg support despite uvs_any2bgr shortcoming
     //  https://github.com/ros-drivers/libuvc_ros/commit/7508a09f
@@ -232,8 +290,27 @@ void CameraDriver::ImageCallback(uvc_frame_t *frame) {
     image->encoding = "bgr8";
     memcpy(&(image->data[0]), rgb_frame_->data, rgb_frame_->data_bytes);
   }
+  */
 
+  cv_bridge::CvImage out_msg, out_msg_16;
 
+  /* 16-bit RAW Mode - original*/
+  out_msg_16.encoding = sensor_msgs::image_encodings::MONO16;
+  out_msg_16.image = thermal16;
+  out_msg_16.header.stamp = timestamp;
+  out_msg_16.header.frame_id = config_.frame_id;
+
+  /* 16-bit RAW Mode - getting squished for display */
+  out_msg.encoding = sensor_msgs::image_encodings::TYPE_8UC1;
+  AGC_Basic_Linear(thermal16, thermal16_linear, config_.height, config_.width);
+  out_msg.image = thermal16_linear;
+  out_msg.header.stamp = timestamp;
+  out_msg.header.frame_id = config_.frame_id;
+
+  pub_vis_16_.publish(out_msg_16.toImageMsg());
+  pub_vis_.publish(out_msg.toImageMsg());
+
+  /*
   sensor_msgs::CameraInfo::Ptr cinfo(
     new sensor_msgs::CameraInfo(cinfo_manager_.getCameraInfo()));
 
@@ -243,6 +320,7 @@ void CameraDriver::ImageCallback(uvc_frame_t *frame) {
   cinfo->header.stamp = timestamp;
 
   cam_pub_.publish(image, cinfo);
+  */
 
   if (config_changed_) {
     config_server_.updateConfig(config_);
@@ -285,7 +363,7 @@ void CameraDriver::AutoControlsCallback(
       switch (selector) {
       case UVC_PU_WHITE_BALANCE_TEMPERATURE_CONTROL:
         uint8_t *data_char = (uint8_t*) data;
-        config_.white_balance_temperature = 
+        config_.white_balance_temperature =
           data_char[0] | (data_char[1] << 8);
         config_changed_ = true;
         break;
@@ -328,15 +406,195 @@ enum uvc_frame_format CameraDriver::GetVideoMode(std::string vmode){
     return UVC_COLOR_FORMAT_MJPEG;
   } else if (vmode == "gray8") {
     return UVC_COLOR_FORMAT_GRAY8;
-  } else if (vmode == "gray16") {
+  }
+  /*else if (vmode == "gray16") {
     return UVC_COLOR_FORMAT_GRAY16;
-  } else {
+  }
+  */else {
     ROS_ERROR_STREAM("Invalid Video Mode: " << vmode);
     ROS_WARN_STREAM("Continue using video mode: uncompressed");
     return UVC_COLOR_FORMAT_UNCOMPRESSED;
   }
 };
 
+void CameraDriver::OpenCamera(UVCCameraConfig &new_config) {
+  assert(state_ == kStopped);
+
+  int vendor_id = strtol(new_config.vendor.c_str(), NULL, 0);
+  int product_id = strtol(new_config.product.c_str(), NULL, 0);
+
+  vendor_id = PT1_VID;
+  product_id = PT1_PID;
+
+  //new_config.vendor = PT1_VID;
+  //new_config.product = PT1_PID;
+
+  ROS_ERROR("Opening camera with vendor=0x%x, product=0x%x, serial=\"%s\", index=%d",
+           vendor_id, product_id, new_config.serial.c_str(), new_config.index);
+
+  uvc_device_t **devs;
+
+  // Implement missing index select behavior
+  // https://github.com/ros-drivers/libuvc_ros/commit/4f30e9a0
+#if libuvc_VERSION     > 00005 /* version > 0.0.5 */
+
+  ROS_ERROR("V > 00005");
+  uvc_error_t find_err = uvc_find_devices(
+    ctx_, &devs,
+    vendor_id,
+    product_id,
+    new_config.serial.empty() ? NULL : new_config.serial.c_str());
+
+  if (find_err != UVC_SUCCESS) {
+    uvc_perror(find_err, "uvc_find_device");
+    return;
+  }
+
+  // select device by index
+  dev_ = NULL;
+  int dev_idx = 0;
+  while (devs[dev_idx] != NULL) {
+    if(dev_idx == new_config.index) {
+      dev_ = devs[dev_idx];
+    }
+    else {
+      uvc_unref_device(devs[dev_idx]);
+    }
+
+    dev_idx++;
+  }
+
+  if(dev_ == NULL) {
+    ROS_ERROR("Unable to find device at index %d", new_config.index);
+    return;
+  }
+#else
+  uvc_error_t find_err = uvc_find_device(
+    ctx_, &dev_,
+    vendor_id,
+    product_id,
+    new_config.serial.empty() ? NULL : new_config.serial.c_str());
+
+  if (find_err != UVC_SUCCESS) {
+    uvc_perror(find_err, "uvc_find_device");
+    return;
+  }
+
+#endif
+  uvc_error_t open_err = uvc_open(dev_, &devh_);
+
+  if (open_err != UVC_SUCCESS) {
+    switch (open_err) {
+    case UVC_ERROR_ACCESS:
+#ifdef __linux__
+      ROS_ERROR("Permission denied opening /dev/bus/usb/%03d/%03d",
+                uvc_get_bus_number(dev_), uvc_get_device_address(dev_));
+#else
+      ROS_ERROR("Permission denied opening device %d on bus %d",
+                uvc_get_device_address(dev_), uvc_get_bus_number(dev_));
+#endif
+      break;
+    default:
+#ifdef __linux__
+      ROS_ERROR("Can't open /dev/bus/usb/%03d/%03d: %s (%d)",
+                uvc_get_bus_number(dev_), uvc_get_device_address(dev_),
+                uvc_strerror(open_err), open_err);
+#else
+      ROS_ERROR("Can't open device %d on bus %d: %s (%d)",
+                uvc_get_device_address(dev_), uvc_get_bus_number(dev_),
+                uvc_strerror(open_err), open_err);
+#endif
+      break;
+    }
+
+    uvc_unref_device(dev_);
+    return;
+  }
+
+    ROS_WARN("Device opened");
+
+    /* Print out a message containing all the information that libuvc
+     * knows about the device */
+    uvc_print_diag(devh_, stderr);
+
+    uvc_device_descriptor_t *desc;
+    uvc_get_device_descriptor(dev_, &desc);
+
+    switch (desc->idVendor)
+    {
+    case PT1_VID:
+        std::cout << "Lepton found" << std::endl;
+        //m_cci = new LeptonVariation(ctx, dev, devh);
+        break;
+    case FLIR_VID:
+        //m_cci = new BosonVariation(ctx, dev, devh);
+        break;
+    default:
+        std::cout << "No Flir device found" << std::endl;
+        break;
+    }
+
+    uvc_free_device_descriptor(desc);
+
+    uvc_stream_ctrl_t ctrl;
+    new_config.width = 160;
+    new_config.height = 120;
+    new_config.video_mode = "uncompressed";
+
+    //UVC_FRAME_FORMAT_YUYV. UVC_FRAME_FORMAT_BY8
+    //UVC_FRAME_FORMAT_BY16
+    enum uvc_frame_format uvcFormat = uvc_frame_format::UVC_FRAME_FORMAT_Y16;
+    //Surface supports format 3
+    //uvcFormat = 3;
+    uvc_error_t mode_err;
+    mode_err = uvc_get_stream_ctrl_format_size(
+                devh_, &ctrl, /* result stored in ctrl */
+                uvcFormat,
+                new_config.width, new_config.height, 0);
+
+    /* Print out the result */
+    uvc_print_stream_ctrl(&ctrl, stderr);
+
+
+  //uvc_set_status_callback(devh_, &CameraDriver::AutoControlsCallbackAdapter, this);
+
+
+  /*
+  uvc_error_t mode_err = uvc_get_stream_ctrl_format_size(
+    devh_, &ctrl,
+    GetVideoMode(new_config.video_mode),
+    new_config.width, new_config.height,
+    new_config.frame_rate);
+  */
+
+  if (mode_err != UVC_SUCCESS) {
+    uvc_perror(mode_err, "uvc_get_stream_ctrl_format_size");
+    uvc_close(devh_);
+    uvc_unref_device(dev_);
+    ROS_ERROR("check video_mode/width/height/frame_rate are available");
+    uvc_print_diag(devh_, NULL);
+    return;
+  }
+
+  uvc_error_t stream_err = uvc_start_streaming(devh_, &ctrl, &CameraDriver::ImageCallbackAdapter, this, 0);
+
+  if (stream_err != UVC_SUCCESS) {
+    uvc_perror(stream_err, "uvc_start_streaming");
+    uvc_close(devh_);
+    uvc_unref_device(dev_);
+    return;
+  }
+
+  if (rgb_frame_)
+    uvc_free_frame(rgb_frame_);
+
+  rgb_frame_ = uvc_allocate_frame(new_config.width * new_config.height * 3);
+  assert(rgb_frame_);
+
+  state_ = kRunning;
+}
+
+/*
 void CameraDriver::OpenCamera(UVCCameraConfig &new_config) {
   assert(state_ == kStopped);
 
@@ -350,7 +608,7 @@ void CameraDriver::OpenCamera(UVCCameraConfig &new_config) {
 
   // Implement missing index select behavior
   // https://github.com/ros-drivers/libuvc_ros/commit/4f30e9a0
-#if libuvc_VERSION     > 00005 /* version > 0.0.5 */
+#if libuvc_VERSION     > 00005
   uvc_error_t find_err = uvc_find_devices(
     ctx_, &devs,
     vendor_id,
@@ -458,6 +716,7 @@ void CameraDriver::OpenCamera(UVCCameraConfig &new_config) {
 
   state_ = kRunning;
 }
+*/
 
 void CameraDriver::CloseCamera() {
   assert(state_ == kRunning);

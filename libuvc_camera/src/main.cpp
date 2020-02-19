@@ -43,7 +43,10 @@ int main (int argc, char **argv) {
   libuvc_camera::CameraDriver driver(nh, priv_nh);
 
   if (!driver.Start())
+  {
+    ROS_ERROR("failed starting");
     return -1;
+  }
 
   ros::spin();
 
