@@ -61,6 +61,7 @@ CameraDriver::CameraDriver(ros::NodeHandle nh, ros::NodeHandle priv_nh)
   cam_pub_ = it_.advertiseCamera("image_raw", 1, false);
 
   pub_vis_ = it_.advertise("thermal_image", 1);
+  pub_rot_ = it_.advertise("thermal_image_rot", 1);
   pub_vis_16_ = it_.advertise("thermal_image_16", 1);
 }
 
@@ -292,7 +293,7 @@ void CameraDriver::ImageCallback(uvc_frame_t *frame) {
   }
   */
 
-  cv_bridge::CvImage out_msg, out_msg_16;
+  cv_bridge::CvImage out_msg, out_msg_16, out_rot;
 
   /* 16-bit RAW Mode - original*/
   out_msg_16.encoding = sensor_msgs::image_encodings::MONO16;
@@ -309,6 +310,18 @@ void CameraDriver::ImageCallback(uvc_frame_t *frame) {
 
   pub_vis_16_.publish(out_msg_16.toImageMsg());
   pub_vis_.publish(out_msg.toImageMsg());
+
+
+  cv::Mat thermal_rotated(config_.width, config_.height, CV_8U, 1);
+  cv::rotate(thermal16_linear, thermal_rotated, cv::ROTATE_90_CLOCKWISE);
+
+  out_rot.encoding = sensor_msgs::image_encodings::TYPE_8UC1;
+  AGC_Basic_Linear(thermal16, thermal16_linear, config_.height, config_.width);
+  out_rot.image = thermal_rotated;
+  out_rot.header.stamp = timestamp;
+  out_rot.header.frame_id = config_.frame_id;
+
+  pub_rot_.publish(out_rot.toImageMsg());
 
   /*
   sensor_msgs::CameraInfo::Ptr cinfo(

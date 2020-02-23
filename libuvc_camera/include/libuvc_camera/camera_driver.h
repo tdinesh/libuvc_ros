@@ -73,6 +73,7 @@ private:
   image_transport::CameraPublisher cam_pub_;
 
   image_transport::Publisher pub_vis_;
+  image_transport::Publisher pub_rot_;
   image_transport::Publisher pub_vis_16_;
 
   dynamic_reconfigure::Server<UVCCameraConfig> config_server_;
